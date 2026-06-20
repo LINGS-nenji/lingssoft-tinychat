@@ -8,7 +8,7 @@ POCKETBASE_URL = os.getenv("POCKETBASE_URL", "http://pocketbase:8090")
 
 @app.get("/")
 def read_root():
-    return {"status": "AI Server is running"}
+    return {"status": "AI Chatbot API Server is running"}
 
 @app.post("/webhook")
 async def pocketbase_webhook(request: Request):
