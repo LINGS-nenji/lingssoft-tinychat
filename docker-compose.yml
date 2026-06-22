@@ -1,5 +1,3 @@
-version: "3.8"
-
 services:
   # 1. 초경량 실시간 채팅 코어 및 DB (PocketBase)
   pocketbase:
@@ -16,17 +14,15 @@ services:
 
   # 2. AI 비즈니스 로직 및 챗봇 엔진 (Python FastAPI)
   fastapi-ai:
-    image: python:3.11-slim
+    build:
+      context: ./pd_chatbot
+      dockerfile: Dockerfile
     container_name: LINGS-chat-fastapi-ai
     restart: unless-stopped
     ports:
       - "8000:8000"
     volumes:
       - ./pd_chatbot:/app
-    working_dir: /app
-    command: >
-      bash -c "pip install --no-cache-dir fastapi uvicorn requests httpx && 
-               uvicorn main:app --host 0.0.0.0 --port 8000 --reload"
     environment:
       - POCKETBASE_URL=http://pocketbase:8090
     depends_on:
