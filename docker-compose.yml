@@ -20,11 +20,15 @@ services:
     container_name: LINGS-chat-fastapi-ai
     restart: unless-stopped
     ports:
-      - "8000:8000"
+      - "${FASTAPI_HOST_PORT:-8000}:${PORT:-8000}"
     volumes:
       - ./pd_chatbot:/app
     environment:
       - POCKETBASE_URL=http://pocketbase:8090
+      - AI_MODEL_URL=${AI_MODEL_URL:-}
+      - AI_MODEL_TIMEOUT=${AI_MODEL_TIMEOUT:-30}
+      - BOT_USER_ID=${BOT_USER_ID:-bot_user_id_placeholder}
+      - PORT=${PORT:-8000}
     depends_on:
       - pocketbase
     networks:

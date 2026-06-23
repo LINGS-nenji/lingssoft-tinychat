@@ -88,7 +88,7 @@ Expected response:
 4. Messages sent by the bot itself are ignored to prevent infinite response loops.
 5. The AI service generates a response and writes it back to the `messages` collection through the PocketBase REST API.
 
-The current AI response is a placeholder. For production use, connect your preferred AI layer in `pd_chatbot/main.py`, such as the OpenAI API, a local LLM, a RAG pipeline, or an internal knowledge base.
+If `AI_MODEL_URL` is configured, FastAPI forwards the user message to that external AI endpoint and uses the returned text as the bot response. If `AI_MODEL_URL` is empty, the service falls back to the current placeholder response.
 
 ## API
 
@@ -129,18 +129,54 @@ Example success response:
 
 ## Configuration
 
-The FastAPI service uses the following environment variable.
+The FastAPI service uses the following environment variables.
 
 | Variable | Default | Description |
 | --- | --- | --- |
 | `POCKETBASE_URL` | `http://pocketbase:8090` | Internal PocketBase URL used inside the Docker network |
+| `AI_MODEL_URL` | empty | External AI model endpoint URL called by FastAPI |
+| `AI_MODEL_TIMEOUT` | `30` | Timeout in seconds for the AI model HTTP request |
+| `BOT_USER_ID` | `bot_user_id_placeholder` | Bot user ID written back to the `messages` collection |
+| `PORT` | `8000` | FastAPI container listening port |
+| `FASTAPI_HOST_PORT` | `8000` | Host port mapped to the FastAPI container |
 
-The value is already configured in Docker Compose:
+The values can be configured in Docker Compose or an `.env` file:
 
 ```yaml
 environment:
   - POCKETBASE_URL=http://pocketbase:8090
+  - AI_MODEL_URL=http://host.docker.internal:11434/api/chat
+  - AI_MODEL_TIMEOUT=30
+  - BOT_USER_ID=your_bot_user_id
+  - PORT=8000
 ```
+
+Example `.env` file:
+
+```env
+AI_MODEL_URL=http://host.docker.internal:11434/api/chat
+AI_MODEL_TIMEOUT=30
+BOT_USER_ID=your_bot_user_id
+PORT=8000
+FASTAPI_HOST_PORT=8000
+```
+
+The external AI endpoint is expected to accept a JSON body like this:
+
+```json
+{
+  "text": "Hello",
+  "sender_id": "user_record_id",
+  "room_id": "general"
+}
+```
+
+The FastAPI service looks for one of these fields in the AI response JSON:
+
+- `response`
+- `text`
+- `answer`
+- `message`
 
 ## PocketBase Setup Notes
 
