@@ -83,10 +83,11 @@ Expected response:
 ## How It Works
 
 1. A user creates a chat message in the PocketBase `messages` collection.
-2. A PocketBase webhook calls the FastAPI `/webhook` endpoint.
+2. A PocketBase message webhook calls the FastAPI `/webhook/messages` endpoint.
 3. FastAPI parses the message text, sender ID, and room ID from the webhook payload.
 4. Messages sent by the bot itself are ignored to prevent infinite response loops.
 5. The AI service generates a response and writes it back to the `messages` collection through the PocketBase REST API.
+6. File or document events can be routed separately to `/webhook/documents`, where ingestion jobs are queued without blocking the chat response path.
 
 If `AI_MODEL_URL` is configured, FastAPI forwards the user message to that external AI endpoint and uses the returned text as the bot response. If `AI_MODEL_URL` is empty, the service falls back to the current placeholder response.
 
@@ -103,6 +104,10 @@ Returns the FastAPI server status.
 ```
 
 ### `POST /webhook`
+
+Legacy compatibility endpoint. It inspects the incoming event and dispatches it to either the message or document handler.
+
+### `POST /webhook/messages`
 
 Receives PocketBase message creation events.
 
@@ -124,6 +129,34 @@ Example success response:
 {
   "status": "success",
   "pocketbase_response": 200
+}
+```
+
+### `POST /webhook/documents`
+
+Receives PocketBase document or attachment events and queues ingestion work in the background.
+
+Expected payload shape:
+
+```json
+{
+  "collection": "documents",
+  "record": {
+    "id": "document_record_id",
+    "room": "general",
+    "files": ["example.pdf"]
+  }
+}
+```
+
+Example queued response:
+
+```json
+{
+  "status": "queued",
+  "document_id": "document_record_id",
+  "room_id": "general",
+  "file_count": 1
 }
 ```
 

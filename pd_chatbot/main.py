@@ -1,13 +1,52 @@
+import logging
 import os
+
 import httpx
-from fastapi import FastAPI, Request
+from fastapi import BackgroundTasks, FastAPI, Request
 
 app = FastAPI()
+logger = logging.getLogger("tinychat")
 
-POCKETBASE_URL = os.getenv("POCKETBASE_URL", "http://pocketbase:8090")
+POCKETBASE_URL = os.getenv("POCKETBASE_URL", "http://pocketbase:8090").rstrip("/")
 AI_MODEL_URL = os.getenv("AI_MODEL_URL", "").strip()
 AI_MODEL_TIMEOUT = float(os.getenv("AI_MODEL_TIMEOUT", "30"))
 BOT_USER_ID = os.getenv("BOT_USER_ID", "bot_user_id_placeholder")
+
+
+def extract_record(data: dict) -> dict:
+    return data.get("record") or {}
+
+
+def detect_collection_name(data: dict) -> str:
+    return (
+        data.get("collection")
+        or data.get("collectionName")
+        or data.get("collection_name")
+        or ""
+    )
+
+
+def is_document_event(data: dict, record: dict) -> bool:
+    collection_name = detect_collection_name(data).lower()
+    if collection_name in {"documents", "attachments", "files"}:
+        return True
+
+    if record.get("document_id") or record.get("file") or record.get("files"):
+        return True
+
+    return False
+
+
+def normalize_file_list(value) -> list[str]:
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, str) and item.strip()]
+    if isinstance(value, str) and value.strip():
+        return [value]
+    return []
+
+
+def build_pocketbase_file_url(collection_name: str, record_id: str, filename: str) -> str:
+    return f"{POCKETBASE_URL}/api/files/{collection_name}/{record_id}/{filename}"
 
 
 async def generate_ai_response(text: str, sender_id: str, room_id: str) -> str:
@@ -36,6 +75,71 @@ async def generate_ai_response(text: str, sender_id: str, room_id: str) -> str:
 
     return "[AI 응답 오류] 모델 서버 응답 형식을 확인하세요."
 
+
+async def write_chat_message(text: str, room_id: str) -> int:
+    payload = {
+        "text": text,
+        "user_id": BOT_USER_ID,
+        "room": room_id,
+    }
+    url = f"{POCKETBASE_URL}/api/collections/messages/records"
+
+    async with httpx.AsyncClient() as client:
+        response = await client.post(url, json=payload)
+        response.raise_for_status()
+        return response.status_code
+
+
+def queue_document_ingestion(document_id: str, room_id: str, file_urls: list[str]) -> None:
+    logger.info(
+        "Document ingestion queued",
+        extra={
+            "document_id": document_id,
+            "room_id": room_id,
+            "file_urls": file_urls,
+        },
+    )
+
+
+async def handle_message_webhook(data: dict) -> dict:
+    record = extract_record(data)
+    text = record.get("text", "")
+    sender_id = record.get("user_id", "")
+    room_id = record.get("room", "general")
+
+    if sender_id == BOT_USER_ID:
+        return {"status": "ignored_bot_message"}
+
+    ai_response = await generate_ai_response(text, sender_id, room_id)
+
+    try:
+        status_code = await write_chat_message(ai_response, room_id)
+    except Exception as exc:
+        return {"status": "error", "detail": str(exc)}
+
+    return {"status": "success", "pocketbase_response": status_code}
+
+
+async def handle_document_webhook(data: dict, background_tasks: BackgroundTasks) -> dict:
+    record = extract_record(data)
+    collection_name = detect_collection_name(data) or "documents"
+    document_id = record.get("id", "")
+    room_id = record.get("room", "general")
+    files = normalize_file_list(record.get("file")) + normalize_file_list(record.get("files"))
+    file_urls = [
+        build_pocketbase_file_url(collection_name, document_id, filename)
+        for filename in files
+    ]
+
+    background_tasks.add_task(queue_document_ingestion, document_id, room_id, file_urls)
+    return {
+        "status": "queued",
+        "document_id": document_id,
+        "room_id": room_id,
+        "file_count": len(file_urls),
+    }
+
+
 @app.get("/")
 def read_root():
     return {
@@ -43,35 +147,34 @@ def read_root():
         "ai_model_url_configured": bool(AI_MODEL_URL),
     }
 
+
 @app.post("/webhook")
-async def pocketbase_webhook(request: Request):
+async def pocketbase_webhook(request: Request, background_tasks: BackgroundTasks):
     """
-    PocketBase에서 메시지가 생성되면 호출되는 웹훅 엔드포인트
+    Legacy webhook entrypoint. Dispatches to message or document handlers.
     """
     data = await request.json()
-    
-    # PocketBase의 웹훅 데이터 구조에 따라 파싱 (버전에 따라 상이할 수 있음)
-    record = data.get("record", {})
-    text = record.get("text", "")
-    sender_id = record.get("user_id", "")
-    room_id = record.get("room", "general")
-    
-    # 무한 루프 방지: 만약 발신자가 봇(Bot) 자신이라면 응답하지 않음
-    if sender_id == BOT_USER_ID:
-        return {"status": "ignored_bot_message"}
+    record = extract_record(data)
 
-    ai_response = await generate_ai_response(text, sender_id, room_id)
-    
-    # PocketBase REST API를 통해 채팅방에 AI 답변 추가
-    async with httpx.AsyncClient() as client:
-        url = f"{POCKETBASE_URL}/api/collections/messages/records"
-        payload = {
-            "text": ai_response,
-            "user_id": BOT_USER_ID, # PocketBase에 등록한 봇 계정 ID
-            "room": room_id
-        }
-        try:
-            response = await client.post(url, json=payload)
-            return {"status": "success", "pocketbase_response": response.status_code}
-        except Exception as e:
-            return {"status": "error", "detail": str(e)}
+    if is_document_event(data, record):
+        return await handle_document_webhook(data, background_tasks)
+
+    return await handle_message_webhook(data)
+
+
+@app.post("/webhook/messages")
+async def pocketbase_message_webhook(request: Request):
+    """
+    PocketBase message-created webhook entrypoint.
+    """
+    data = await request.json()
+    return await handle_message_webhook(data)
+
+
+@app.post("/webhook/documents")
+async def pocketbase_document_webhook(request: Request, background_tasks: BackgroundTasks):
+    """
+    PocketBase document-created webhook entrypoint.
+    """
+    data = await request.json()
+    return await handle_document_webhook(data, background_tasks)
