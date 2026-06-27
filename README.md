@@ -213,13 +213,22 @@ The FastAPI service looks for one of these fields in the AI response JSON:
 
 ## PocketBase Setup Notes
 
-At minimum, PocketBase should include a `messages` collection with fields similar to the following.
+At minimum, PocketBase should include the following collections.
 
-| Collection | Field | Example |
+| Collection | Purpose | Key fields |
 | --- | --- | --- |
-| `messages` | `text` | `"Hello"` |
-| `messages` | `user_id` | `"user_record_id"` |
-| `messages` | `room` | `"general"` |
+| `messages` | User and bot chat messages | `text`, `user_id`, `room`, `message_type`, `processing_status`, `document_id`, `attachments` |
+| `documents` | Uploaded files and RAG ingestion lifecycle | `title`, `room`, `uploaded_by`, `source_message`, `processing_status`, `file`, `chunk_count`, `last_error` |
+| `attachments` | Multiple file references linked to messages and documents | `message_id`, `document_id`, `file`, `file_name`, `mime_type`, `processing_status` |
+
+Detailed field guidance is documented in [pocketbase/schema-reference.md](/Users/nenji/Docker/LINGSSOFT/tinyChat/pocketbase/schema-reference.md).
+
+For the webhook flow used by this project:
+
+- New user messages should be created with `message_type = user` and `processing_status = pending`.
+- Bot responses are written by FastAPI with `message_type = bot` and `processing_status = completed`.
+- New documents should start with `processing_status = pending`.
+- The document webhook moves documents to `queued` before ingestion begins.
 
 The FastAPI service currently uses a placeholder bot account ID:
 
