@@ -11,6 +11,9 @@ POCKETBASE_URL = os.getenv("POCKETBASE_URL", "http://pocketbase:8090").rstrip("/
 AI_MODEL_URL = os.getenv("AI_MODEL_URL", "").strip()
 AI_MODEL_TIMEOUT = float(os.getenv("AI_MODEL_TIMEOUT", "30"))
 BOT_USER_ID = os.getenv("BOT_USER_ID", "bot_user_id_placeholder")
+MESSAGES_COLLECTION = os.getenv("MESSAGES_COLLECTION", "messages")
+DOCUMENTS_COLLECTION = os.getenv("DOCUMENTS_COLLECTION", "documents")
+ATTACHMENTS_COLLECTION = os.getenv("ATTACHMENTS_COLLECTION", "attachments")
 
 
 def extract_record(data: dict) -> dict:
@@ -28,7 +31,11 @@ def detect_collection_name(data: dict) -> str:
 
 def is_document_event(data: dict, record: dict) -> bool:
     collection_name = detect_collection_name(data).lower()
-    if collection_name in {"documents", "attachments", "files"}:
+    if collection_name in {
+        DOCUMENTS_COLLECTION.lower(),
+        ATTACHMENTS_COLLECTION.lower(),
+        "files",
+    }:
         return True
 
     if record.get("document_id") or record.get("file") or record.get("files"):
@@ -81,11 +88,22 @@ async def write_chat_message(text: str, room_id: str) -> int:
         "text": text,
         "user_id": BOT_USER_ID,
         "room": room_id,
+        "message_type": "bot",
+        "processing_status": "completed",
     }
-    url = f"{POCKETBASE_URL}/api/collections/messages/records"
+    url = f"{POCKETBASE_URL}/api/collections/{MESSAGES_COLLECTION}/records"
 
     async with httpx.AsyncClient() as client:
         response = await client.post(url, json=payload)
+        response.raise_for_status()
+        return response.status_code
+
+
+async def update_record(collection_name: str, record_id: str, payload: dict) -> int:
+    url = f"{POCKETBASE_URL}/api/collections/{collection_name}/records/{record_id}"
+
+    async with httpx.AsyncClient() as client:
+        response = await client.patch(url, json=payload)
         response.raise_for_status()
         return response.status_code
 
@@ -106,9 +124,20 @@ async def handle_message_webhook(data: dict) -> dict:
     text = record.get("text", "")
     sender_id = record.get("user_id", "")
     room_id = record.get("room", "general")
+    message_type = record.get("message_type", "user")
+    processing_status = record.get("processing_status", "pending")
 
     if sender_id == BOT_USER_ID:
         return {"status": "ignored_bot_message"}
+
+    if message_type != "user":
+        return {"status": "ignored_message_type", "message_type": message_type}
+
+    if processing_status not in {"pending", "queued"}:
+        return {
+            "status": "ignored_processing_status",
+            "processing_status": processing_status,
+        }
 
     ai_response = await generate_ai_response(text, sender_id, room_id)
 
@@ -122,14 +151,34 @@ async def handle_message_webhook(data: dict) -> dict:
 
 async def handle_document_webhook(data: dict, background_tasks: BackgroundTasks) -> dict:
     record = extract_record(data)
-    collection_name = detect_collection_name(data) or "documents"
+    collection_name = detect_collection_name(data) or DOCUMENTS_COLLECTION
     document_id = record.get("id", "")
     room_id = record.get("room", "general")
+    processing_status = record.get("processing_status", "pending")
+    attachments = normalize_file_list(record.get("attachments"))
     files = normalize_file_list(record.get("file")) + normalize_file_list(record.get("files"))
+    files.extend(attachments)
     file_urls = [
         build_pocketbase_file_url(collection_name, document_id, filename)
         for filename in files
     ]
+
+    if processing_status not in {"pending", "queued"}:
+        return {
+            "status": "ignored_processing_status",
+            "processing_status": processing_status,
+            "document_id": document_id,
+        }
+
+    if collection_name == DOCUMENTS_COLLECTION and document_id:
+        try:
+            await update_record(
+                DOCUMENTS_COLLECTION,
+                document_id,
+                {"processing_status": "queued"},
+            )
+        except Exception as exc:
+            logger.warning("Failed to update document status: %s", exc)
 
     background_tasks.add_task(queue_document_ingestion, document_id, room_id, file_urls)
     return {
