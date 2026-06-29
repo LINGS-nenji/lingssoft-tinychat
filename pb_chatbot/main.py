@@ -15,6 +15,7 @@ BOT_USER_ID = os.getenv("BOT_USER_ID", "bot_user_id_placeholder")
 MESSAGES_COLLECTION = os.getenv("MESSAGES_COLLECTION", "messages")
 DOCUMENTS_COLLECTION = os.getenv("DOCUMENTS_COLLECTION", "documents")
 ATTACHMENTS_COLLECTION = os.getenv("ATTACHMENTS_COLLECTION", "attachments")
+CHROMA_PERSIST_DIR = os.getenv("CHROMA_PERSIST_DIR", "/data/chroma")
 
 
 def extract_record(data: dict) -> dict:
@@ -225,6 +226,7 @@ async def ingest_document(collection_name: str, record: dict[str, Any]) -> dict[
             "document_id": document_id,
             "room_id": room_id,
             "file_urls": file_urls,
+            "chroma_persist_dir": CHROMA_PERSIST_DIR,
         },
     )
 
@@ -347,6 +349,7 @@ def read_root():
     return {
         "status": "AI Chatbot API Server is running",
         "ai_model_url_configured": bool(AI_MODEL_URL),
+        "chroma_persist_dir": CHROMA_PERSIST_DIR,
     }
 
 
