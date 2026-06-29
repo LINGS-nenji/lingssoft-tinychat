@@ -86,8 +86,8 @@ Expected response:
 2. A PocketBase message webhook calls the FastAPI `/webhook/messages` endpoint.
 3. FastAPI parses the message text, sender ID, and room ID from the webhook payload.
 4. Messages sent by the bot itself are ignored to prevent infinite response loops.
-5. The AI service generates a response and writes it back to the `messages` collection through the PocketBase REST API.
-6. File or document events can be routed separately to `/webhook/documents`, where ingestion jobs are queued without blocking the chat response path.
+5. The AI service routes chat requests through `chat_with_rag()`, which prepares message context for the model layer and writes the bot response back to the `messages` collection.
+6. File or document events can be routed separately to `/webhook/documents`, where `ingest_document()` runs in the background without blocking the chat response path.
 
 If `AI_MODEL_URL` is configured, FastAPI forwards the user message to that external AI endpoint and uses the returned text as the bot response. If `AI_MODEL_URL` is empty, the service falls back to the current placeholder response.
 
@@ -148,6 +148,14 @@ Expected payload shape:
   }
 }
 ```
+
+Current ingestion behavior:
+
+- marks the document as `processing`
+- prepares PocketBase file URLs for later parsers and chunkers
+- finalizes the record as `completed` with a placeholder `chunk_count`
+
+This keeps the ingestion lifecycle separate from chat generation so that a later Chroma or embedding step can be added inside `ingest_document()` without changing the webhook contract.
 
 Example queued response:
 
