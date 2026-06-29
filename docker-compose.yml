@@ -15,19 +15,21 @@ services:
   # 2. AI 비즈니스 로직 및 챗봇 엔진 (Python FastAPI)
   fastapi-ai:
     build:
-      context: ./pd_chatbot
+      context: ./pb_chatbot
       dockerfile: Dockerfile
     container_name: LINGS-chat-fastapi-ai
     restart: unless-stopped
     ports:
       - "${FASTAPI_HOST_PORT:-8000}:${PORT:-8000}"
     volumes:
-      - ./pd_chatbot:/app
+      - ./pb_chatbot:/app
+      - ./chroma_data:/data/chroma
     environment:
       - POCKETBASE_URL=http://pocketbase:8090
       - AI_MODEL_URL=${AI_MODEL_URL:-}
       - AI_MODEL_TIMEOUT=${AI_MODEL_TIMEOUT:-30}
       - BOT_USER_ID=${BOT_USER_ID:-bot_user_id_placeholder}
+      - CHROMA_PERSIST_DIR=${CHROMA_PERSIST_DIR:-/data/chroma}
       - PORT=${PORT:-8000}
     depends_on:
       - pocketbase

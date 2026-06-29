@@ -141,3 +141,5 @@ cython_debug/
 # Project local data
 pb_data/
 pb_public/
+chroma_data/*
+!chroma_data/.gitkeep

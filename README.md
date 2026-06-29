@@ -43,7 +43,8 @@ PocketBase messages collection
 ```text
 tinyChat/
 ├── docker-compose.yml      # PocketBase + FastAPI service definition
-├── pd_chatbot/
+├── chroma_data/            # Local persistent vector store data
+├── pb_chatbot/
 │   └── main.py             # FastAPI AI webhook server
 ├── pb_data/                # Local PocketBase data
 ├── pb_public/              # PocketBase public assets
@@ -178,6 +179,7 @@ The FastAPI service uses the following environment variables.
 | `AI_MODEL_URL` | empty | External AI model endpoint URL called by FastAPI |
 | `AI_MODEL_TIMEOUT` | `30` | Timeout in seconds for the AI model HTTP request |
 | `BOT_USER_ID` | `bot_user_id_placeholder` | Bot user ID written back to the `messages` collection |
+| `CHROMA_PERSIST_DIR` | `/data/chroma` | Persistent local directory for Chroma vector data |
 | `PORT` | `8000` | FastAPI container listening port |
 | `FASTAPI_HOST_PORT` | `8000` | Host port mapped to the FastAPI container |
 
@@ -189,6 +191,7 @@ environment:
   - AI_MODEL_URL=http://host.docker.internal:11434/api/chat
   - AI_MODEL_TIMEOUT=30
   - BOT_USER_ID=your_bot_user_id
+  - CHROMA_PERSIST_DIR=/data/chroma
   - PORT=8000
 ```
 
@@ -198,9 +201,12 @@ Example `.env` file:
 AI_MODEL_URL=http://host.docker.internal:11434/api/chat
 AI_MODEL_TIMEOUT=30
 BOT_USER_ID=your_bot_user_id
+CHROMA_PERSIST_DIR=/data/chroma
 PORT=8000
 FASTAPI_HOST_PORT=8000
 ```
+
+The FastAPI container mounts `./chroma_data` to `/data/chroma`, so local vector data survives container restarts. This path is now reserved for the upcoming Chroma integration.
 
 The external AI endpoint is expected to accept a JSON body like this:
 
@@ -248,7 +254,9 @@ Before using the service in a real environment, create a bot user or bot record 
 
 ## Development
 
-The FastAPI container mounts `pd_chatbot` into `/app` and runs with `uvicorn --reload`. Changes to `pd_chatbot/main.py` are automatically picked up by the development server.
+The FastAPI container mounts `pb_chatbot` into `/app` and runs with `uvicorn --reload`. Changes to `pb_chatbot/main.py` are automatically picked up by the development server.
+
+The `chroma_data/` directory is kept out of git and is intended to hold local persisted embeddings and vector index files.
 
 ```bash
 docker compose logs -f fastapi-ai
