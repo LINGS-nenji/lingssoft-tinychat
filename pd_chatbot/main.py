@@ -1,5 +1,6 @@
 import logging
 import os
+from typing import Any
 
 import httpx
 from fastapi import BackgroundTasks, FastAPI, Request
@@ -56,15 +57,28 @@ def build_pocketbase_file_url(collection_name: str, record_id: str, filename: st
     return f"{POCKETBASE_URL}/api/files/{collection_name}/{record_id}/{filename}"
 
 
-async def generate_ai_response(text: str, sender_id: str, room_id: str) -> str:
-    if not AI_MODEL_URL:
-        return f"[AI 봇 답변] '{text}'라고 말씀하셨군요. 이 부분에 AI 엔진을 연동하세요."
-
-    payload = {
+def build_ai_payload(
+    text: str,
+    sender_id: str,
+    room_id: str,
+    document_id: str = "",
+    attachment_ids: list[str] | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {
         "text": text,
         "sender_id": sender_id,
         "room_id": room_id,
+        "document_id": document_id,
+        "attachment_ids": attachment_ids or [],
+        "metadata": metadata or {},
     }
+
+
+async def call_ai_model(payload: dict[str, Any]) -> str:
+    if not AI_MODEL_URL:
+        text = payload.get("text", "")
+        return f"[AI 봇 답변] '{text}'라고 말씀하셨군요. 이 부분에 AI 엔진을 연동하세요."
 
     try:
         async with httpx.AsyncClient(timeout=AI_MODEL_TIMEOUT) as client:
@@ -83,20 +97,31 @@ async def generate_ai_response(text: str, sender_id: str, room_id: str) -> str:
     return "[AI 응답 오류] 모델 서버 응답 형식을 확인하세요."
 
 
-async def write_chat_message(text: str, room_id: str) -> int:
+async def create_record(collection_name: str, payload: dict[str, Any]) -> int:
+    url = f"{POCKETBASE_URL}/api/collections/{collection_name}/records"
+
+    async with httpx.AsyncClient() as client:
+        response = await client.post(url, json=payload)
+        response.raise_for_status()
+        return response.status_code
+
+
+async def write_chat_message(
+    text: str,
+    room_id: str,
+    document_id: str = "",
+    attachments: list[str] | None = None,
+) -> int:
     payload = {
         "text": text,
         "user_id": BOT_USER_ID,
         "room": room_id,
         "message_type": "bot",
         "processing_status": "completed",
+        "document_id": document_id or None,
+        "attachments": attachments or [],
     }
-    url = f"{POCKETBASE_URL}/api/collections/{MESSAGES_COLLECTION}/records"
-
-    async with httpx.AsyncClient() as client:
-        response = await client.post(url, json=payload)
-        response.raise_for_status()
-        return response.status_code
+    return await create_record(MESSAGES_COLLECTION, payload)
 
 
 async def update_record(collection_name: str, record_id: str, payload: dict) -> int:
@@ -119,11 +144,132 @@ def queue_document_ingestion(document_id: str, room_id: str, file_urls: list[str
     )
 
 
-async def handle_message_webhook(data: dict) -> dict:
-    record = extract_record(data)
+async def chat_with_rag(record: dict[str, Any]) -> dict[str, Any]:
     text = record.get("text", "")
     sender_id = record.get("user_id", "")
     room_id = record.get("room", "general")
+    document_id = record.get("document_id", "")
+    attachments = normalize_file_list(record.get("attachments"))
+    metadata = record.get("metadata")
+    message_id = record.get("id", "")
+
+    if message_id:
+        try:
+            await update_record(
+                MESSAGES_COLLECTION,
+                message_id,
+                {"processing_status": "processing"},
+            )
+        except Exception as exc:
+            logger.warning("Failed to update message status: %s", exc)
+
+    payload = build_ai_payload(
+        text=text,
+        sender_id=sender_id,
+        room_id=room_id,
+        document_id=document_id,
+        attachment_ids=attachments,
+        metadata=metadata if isinstance(metadata, dict) else {},
+    )
+    ai_response = await call_ai_model(payload)
+    status_code = await write_chat_message(
+        ai_response,
+        room_id,
+        document_id=document_id,
+        attachments=attachments,
+    )
+
+    if message_id:
+        try:
+            await update_record(
+                MESSAGES_COLLECTION,
+                message_id,
+                {"processing_status": "completed"},
+            )
+        except Exception as exc:
+            logger.warning("Failed to finalize message status: %s", exc)
+
+    return {
+        "status": "success",
+        "pocketbase_response": status_code,
+        "message_id": message_id,
+    }
+
+
+async def ingest_document(collection_name: str, record: dict[str, Any]) -> dict[str, Any]:
+    document_id = record.get("id", "")
+    room_id = record.get("room", "general")
+    attachments = normalize_file_list(record.get("attachments"))
+    files = normalize_file_list(record.get("file")) + normalize_file_list(record.get("files"))
+    files.extend(attachments)
+    file_urls = [
+        build_pocketbase_file_url(collection_name, document_id, filename)
+        for filename in files
+    ]
+
+    if collection_name == DOCUMENTS_COLLECTION and document_id:
+        await update_record(
+            DOCUMENTS_COLLECTION,
+            document_id,
+            {
+                "processing_status": "processing",
+                "chunk_count": 0,
+                "last_error": "",
+            },
+        )
+
+    logger.info(
+        "Document ingestion started",
+        extra={
+            "collection_name": collection_name,
+            "document_id": document_id,
+            "room_id": room_id,
+            "file_urls": file_urls,
+        },
+    )
+
+    if collection_name == DOCUMENTS_COLLECTION and document_id:
+        await update_record(
+            DOCUMENTS_COLLECTION,
+            document_id,
+            {
+                "processing_status": "completed",
+                "chunk_count": len(file_urls),
+                "last_error": "",
+            },
+        )
+
+    return {
+        "status": "completed",
+        "document_id": document_id,
+        "room_id": room_id,
+        "file_count": len(file_urls),
+    }
+
+
+async def run_document_ingestion_task(collection_name: str, record: dict[str, Any]) -> None:
+    document_id = record.get("id", "")
+    try:
+        await ingest_document(collection_name, record)
+    except Exception as exc:
+        logger.exception("Document ingestion failed: %s", exc)
+        if collection_name == DOCUMENTS_COLLECTION and document_id:
+            try:
+                await update_record(
+                    DOCUMENTS_COLLECTION,
+                    document_id,
+                    {
+                        "processing_status": "failed",
+                        "last_error": str(exc),
+                    },
+                )
+            except Exception as nested_exc:
+                logger.warning("Failed to persist document failure: %s", nested_exc)
+
+
+async def handle_message_webhook(data: dict) -> dict:
+    record = extract_record(data)
+    sender_id = record.get("user_id", "")
     message_type = record.get("message_type", "user")
     processing_status = record.get("processing_status", "pending")
 
@@ -139,14 +285,20 @@ async def handle_message_webhook(data: dict) -> dict:
             "processing_status": processing_status,
         }
 
-    ai_response = await generate_ai_response(text, sender_id, room_id)
-
     try:
-        status_code = await write_chat_message(ai_response, room_id)
+        return await chat_with_rag(record)
     except Exception as exc:
+        message_id = record.get("id", "")
+        if message_id:
+            try:
+                await update_record(
+                    MESSAGES_COLLECTION,
+                    message_id,
+                    {"processing_status": "failed"},
+                )
+            except Exception as nested_exc:
+                logger.warning("Failed to persist message failure: %s", nested_exc)
         return {"status": "error", "detail": str(exc)}
-
-    return {"status": "success", "pocketbase_response": status_code}
 
 
 async def handle_document_webhook(data: dict, background_tasks: BackgroundTasks) -> dict:
@@ -180,7 +332,8 @@ async def handle_document_webhook(data: dict, background_tasks: BackgroundTasks)
         except Exception as exc:
             logger.warning("Failed to update document status: %s", exc)
 
-    background_tasks.add_task(queue_document_ingestion, document_id, room_id, file_urls)
+    queue_document_ingestion(document_id, room_id, file_urls)
+    background_tasks.add_task(run_document_ingestion_task, collection_name, record)
     return {
         "status": "queued",
         "document_id": document_id,
