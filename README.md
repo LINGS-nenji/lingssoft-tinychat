@@ -90,7 +90,7 @@ Expected response:
 5. The AI service routes chat requests through `chat_with_rag()`, which prepares message context for the model layer and writes the bot response back to the `messages` collection.
 6. File or document events can be routed separately to `/webhook/documents`, where `ingest_document()` runs in the background without blocking the chat response path.
 
-If `AI_MODEL_URL` is configured, FastAPI forwards the user message to that external AI endpoint and uses the returned text as the bot response. If `AI_MODEL_URL` is empty, the service falls back to the current placeholder response.
+If `AI_MODEL_URL` is configured, FastAPI forwards the user message through a provider-aware LLM adapter and uses the returned text as the bot response. Supported modes are `ollama`, `openai`, and `generic`. If `AI_MODEL_URL` is empty, the service falls back to the current placeholder response.
 
 ## API
 
@@ -178,6 +178,12 @@ The FastAPI service uses the following environment variables.
 | `POCKETBASE_URL` | `http://pocketbase:8090` | Internal PocketBase URL used inside the Docker network |
 | `AI_MODEL_URL` | empty | External AI model endpoint URL called by FastAPI |
 | `AI_MODEL_TIMEOUT` | `30` | Timeout in seconds for the AI model HTTP request |
+| `LLM_PROVIDER` | `auto` | `ollama`, `openai`, or `generic`; `auto` infers from the URL |
+| `LLM_MODEL` | empty | Model name used for Ollama or OpenAI-compatible chat requests |
+| `LLM_API_KEY` | empty | Bearer token used for OpenAI-compatible APIs |
+| `LLM_SYSTEM_PROMPT` | built-in default | System prompt sent to the model provider |
+| `LLM_TEMPERATURE` | `0.2` | Sampling temperature |
+| `LLM_MAX_TOKENS` | `512` | Output token budget or nearest provider equivalent |
 | `BOT_USER_ID` | `bot_user_id_placeholder` | Bot user ID written back to the `messages` collection |
 | `CHROMA_PERSIST_DIR` | `/data/chroma` | Persistent local directory for Chroma vector data |
 | `PORT` | `8000` | FastAPI container listening port |
@@ -190,6 +196,8 @@ environment:
   - POCKETBASE_URL=http://pocketbase:8090
   - AI_MODEL_URL=http://host.docker.internal:11434/api/chat
   - AI_MODEL_TIMEOUT=30
+  - LLM_PROVIDER=ollama
+  - LLM_MODEL=qwen2.5:7b-instruct
   - BOT_USER_ID=your_bot_user_id
   - CHROMA_PERSIST_DIR=/data/chroma
   - PORT=8000
@@ -200,6 +208,8 @@ Example `.env` file:
 ```env
 AI_MODEL_URL=http://host.docker.internal:11434/api/chat
 AI_MODEL_TIMEOUT=30
+LLM_PROVIDER=ollama
+LLM_MODEL=qwen2.5:7b-instruct
 BOT_USER_ID=your_bot_user_id
 CHROMA_PERSIST_DIR=/data/chroma
 PORT=8000
@@ -208,22 +218,46 @@ FASTAPI_HOST_PORT=8000
 
 The FastAPI container mounts `./chroma_data` to `/data/chroma`, so local vector data survives container restarts. This path is now reserved for the upcoming Chroma integration.
 
-The external AI endpoint is expected to accept a JSON body like this:
+### Provider modes
+
+`ollama`
+
+- Typical URL: `http://host.docker.internal:11434/api/chat`
+- Requires: `LLM_MODEL`
+- Response parsing: `message.content` or `response`
+
+`openai`
+
+- Typical URL: `https://api.openai.com/v1/chat/completions`
+- Requires: `LLM_MODEL`
+- Usually also requires: `LLM_API_KEY`
+- Response parsing: `choices[0].message.content`
+
+`generic`
+
+- Uses the legacy raw payload and looks for `response`, `text`, `answer`, or `message`
+
+The generic request payload looks like this:
 
 ```json
 {
   "text": "Hello",
   "sender_id": "user_record_id",
-  "room_id": "general"
+  "room_id": "general",
+  "document_id": "document_record_id",
+  "attachment_ids": ["attachment_record_id"],
+  "metadata": {}
 }
 ```
 
-The FastAPI service looks for one of these fields in the AI response JSON:
+Example OpenAI-compatible `.env` values:
 
-- `response`
-- `text`
-- `answer`
-- `message`
+```env
+AI_MODEL_URL=https://api.openai.com/v1/chat/completions
+LLM_PROVIDER=openai
+LLM_MODEL=gpt-4.1-mini
+LLM_API_KEY=your_api_key
+```
 
 ## PocketBase Setup Notes
 

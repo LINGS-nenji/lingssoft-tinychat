@@ -11,6 +11,15 @@ logger = logging.getLogger("tinychat")
 POCKETBASE_URL = os.getenv("POCKETBASE_URL", "http://pocketbase:8090").rstrip("/")
 AI_MODEL_URL = os.getenv("AI_MODEL_URL", "").strip()
 AI_MODEL_TIMEOUT = float(os.getenv("AI_MODEL_TIMEOUT", "30"))
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "auto").strip().lower()
+LLM_MODEL = os.getenv("LLM_MODEL", "").strip()
+LLM_API_KEY = os.getenv("LLM_API_KEY", "").strip()
+LLM_SYSTEM_PROMPT = os.getenv(
+    "LLM_SYSTEM_PROMPT",
+    "You are a helpful assistant for a lightweight PocketBase chat application.",
+).strip()
+LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.2"))
+LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "512"))
 BOT_USER_ID = os.getenv("BOT_USER_ID", "bot_user_id_placeholder")
 MESSAGES_COLLECTION = os.getenv("MESSAGES_COLLECTION", "messages")
 DOCUMENTS_COLLECTION = os.getenv("DOCUMENTS_COLLECTION", "documents")
@@ -76,26 +85,168 @@ def build_ai_payload(
     }
 
 
-async def call_ai_model(payload: dict[str, Any]) -> str:
-    if not AI_MODEL_URL:
-        text = payload.get("text", "")
-        return f"[AI 봇 답변] '{text}'라고 말씀하셨군요. 이 부분에 AI 엔진을 연동하세요."
+def detect_llm_provider() -> str:
+    if LLM_PROVIDER in {"ollama", "openai", "generic"}:
+        return LLM_PROVIDER
 
-    try:
-        async with httpx.AsyncClient(timeout=AI_MODEL_TIMEOUT) as client:
-            response = await client.post(AI_MODEL_URL, json=payload)
-            response.raise_for_status()
-            data = response.json()
-    except Exception as exc:
-        return f"[AI 호출 오류] {exc}"
+    if "/api/chat" in AI_MODEL_URL or "/api/generate" in AI_MODEL_URL:
+        return "ollama"
 
+    if "/chat/completions" in AI_MODEL_URL or "/responses" in AI_MODEL_URL:
+        return "openai"
+
+    return "generic"
+
+
+def build_llm_headers(provider: str) -> dict[str, str]:
+    headers = {"Content-Type": "application/json"}
+    if provider == "openai" and LLM_API_KEY:
+        headers["Authorization"] = f"Bearer {LLM_API_KEY}"
+    return headers
+
+
+def extract_generic_response(data: Any) -> str:
     if isinstance(data, dict):
         for key in ("response", "text", "answer", "message"):
             value = data.get(key)
             if isinstance(value, str) and value.strip():
                 return value
+    return ""
 
-    return "[AI 응답 오류] 모델 서버 응답 형식을 확인하세요."
+
+def extract_openai_response(data: Any) -> str:
+    if not isinstance(data, dict):
+        return ""
+
+    output = data.get("output")
+    if isinstance(output, list):
+        texts: list[str] = []
+        for item in output:
+            if not isinstance(item, dict):
+                continue
+            content = item.get("content")
+            if not isinstance(content, list):
+                continue
+            for entry in content:
+                if isinstance(entry, dict):
+                    text = entry.get("text")
+                    if isinstance(text, str) and text.strip():
+                        texts.append(text.strip())
+        if texts:
+            return "\n".join(texts)
+
+    choices = data.get("choices")
+    if isinstance(choices, list) and choices:
+        message = choices[0].get("message", {})
+        content = message.get("content")
+        if isinstance(content, str) and content.strip():
+            return content
+
+    return ""
+
+
+def extract_ollama_response(data: Any) -> str:
+    if not isinstance(data, dict):
+        return ""
+
+    message = data.get("message")
+    if isinstance(message, dict):
+        content = message.get("content")
+        if isinstance(content, str) and content.strip():
+            return content
+
+    response = data.get("response")
+    if isinstance(response, str) and response.strip():
+        return response
+
+    return ""
+
+
+def build_openai_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "model": LLM_MODEL,
+        "messages": [
+            {"role": "system", "content": LLM_SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": payload.get("text", ""),
+            },
+        ],
+        "temperature": LLM_TEMPERATURE,
+        "max_tokens": LLM_MAX_TOKENS,
+        "metadata": {
+            "room_id": payload.get("room_id", ""),
+            "sender_id": payload.get("sender_id", ""),
+            "document_id": payload.get("document_id", ""),
+        },
+    }
+
+
+def build_ollama_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    user_text = payload.get("text", "")
+    room_id = payload.get("room_id", "")
+    sender_id = payload.get("sender_id", "")
+    document_id = payload.get("document_id", "")
+    attachment_ids = payload.get("attachment_ids", [])
+
+    prompt = (
+        f"room_id: {room_id}\n"
+        f"sender_id: {sender_id}\n"
+        f"document_id: {document_id}\n"
+        f"attachment_ids: {attachment_ids}\n\n"
+        f"user_message:\n{user_text}"
+    )
+
+    return {
+        "model": LLM_MODEL,
+        "messages": [
+            {"role": "system", "content": LLM_SYSTEM_PROMPT},
+            {"role": "user", "content": prompt},
+        ],
+        "stream": False,
+        "options": {
+            "temperature": LLM_TEMPERATURE,
+            "num_predict": LLM_MAX_TOKENS,
+        },
+    }
+
+
+def build_request_payload(provider: str, payload: dict[str, Any]) -> dict[str, Any]:
+    if provider == "openai":
+        return build_openai_payload(payload)
+    if provider == "ollama":
+        return build_ollama_payload(payload)
+    return payload
+
+
+async def call_ai_model(payload: dict[str, Any]) -> str:
+    if not AI_MODEL_URL:
+        text = payload.get("text", "")
+        return f"[AI 봇 답변] '{text}'라고 말씀하셨군요. 이 부분에 AI 엔진을 연동하세요."
+
+    provider = detect_llm_provider()
+    request_payload = build_request_payload(provider, payload)
+    headers = build_llm_headers(provider)
+
+    try:
+        async with httpx.AsyncClient(timeout=AI_MODEL_TIMEOUT) as client:
+            response = await client.post(AI_MODEL_URL, json=request_payload, headers=headers)
+            response.raise_for_status()
+            data = response.json()
+    except Exception as exc:
+        return f"[AI 호출 오류] {exc}"
+
+    if provider == "openai":
+        text = extract_openai_response(data)
+    elif provider == "ollama":
+        text = extract_ollama_response(data)
+    else:
+        text = extract_generic_response(data)
+
+    if text:
+        return text
+
+    return f"[AI 응답 오류] {provider} 응답 형식을 확인하세요."
 
 
 async def create_record(collection_name: str, payload: dict[str, Any]) -> int:
@@ -349,6 +500,8 @@ def read_root():
     return {
         "status": "AI Chatbot API Server is running",
         "ai_model_url_configured": bool(AI_MODEL_URL),
+        "llm_provider": detect_llm_provider(),
+        "llm_model": LLM_MODEL,
         "chroma_persist_dir": CHROMA_PERSIST_DIR,
     }
 
