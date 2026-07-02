@@ -20,6 +20,7 @@ LLM_SYSTEM_PROMPT = os.getenv(
 ).strip()
 LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.2"))
 LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "512"))
+MEMORY_WINDOW_SIZE = int(os.getenv("MEMORY_WINDOW_SIZE", "8"))
 BOT_USER_ID = os.getenv("BOT_USER_ID", "bot_user_id_placeholder")
 MESSAGES_COLLECTION = os.getenv("MESSAGES_COLLECTION", "messages")
 DOCUMENTS_COLLECTION = os.getenv("DOCUMENTS_COLLECTION", "documents")
@@ -73,6 +74,7 @@ def build_ai_payload(
     room_id: str,
     document_id: str = "",
     attachment_ids: list[str] | None = None,
+    conversation_history: list[dict[str, str]] | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
@@ -81,6 +83,7 @@ def build_ai_payload(
         "room_id": room_id,
         "document_id": document_id,
         "attachment_ids": attachment_ids or [],
+        "conversation_history": conversation_history or [],
         "metadata": metadata or {},
     }
 
@@ -163,15 +166,22 @@ def extract_ollama_response(data: Any) -> str:
 
 
 def build_openai_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    messages = [{"role": "system", "content": LLM_SYSTEM_PROMPT}]
+    for item in payload.get("conversation_history", []):
+        role = item.get("role", "user")
+        content = item.get("content", "")
+        if content:
+            messages.append({"role": role, "content": content})
+    messages.append(
+        {
+            "role": "user",
+            "content": payload.get("text", ""),
+        }
+    )
+
     return {
         "model": LLM_MODEL,
-        "messages": [
-            {"role": "system", "content": LLM_SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": payload.get("text", ""),
-            },
-        ],
+        "messages": messages,
         "temperature": LLM_TEMPERATURE,
         "max_tokens": LLM_MAX_TOKENS,
         "metadata": {
@@ -188,12 +198,21 @@ def build_ollama_payload(payload: dict[str, Any]) -> dict[str, Any]:
     sender_id = payload.get("sender_id", "")
     document_id = payload.get("document_id", "")
     attachment_ids = payload.get("attachment_ids", [])
+    conversation_history = payload.get("conversation_history", [])
+
+    history_lines: list[str] = []
+    for item in conversation_history:
+        role = item.get("role", "user")
+        content = item.get("content", "")
+        if content:
+            history_lines.append(f"{role}: {content}")
 
     prompt = (
         f"room_id: {room_id}\n"
         f"sender_id: {sender_id}\n"
         f"document_id: {document_id}\n"
         f"attachment_ids: {attachment_ids}\n\n"
+        f"recent_conversation:\n" + ("\n".join(history_lines) if history_lines else "(none)") + "\n\n"
         f"user_message:\n{user_text}"
     )
 
@@ -285,6 +304,53 @@ async def update_record(collection_name: str, record_id: str, payload: dict) -> 
         return response.status_code
 
 
+def map_message_role(message_type: str, user_id: str) -> str:
+    if user_id == BOT_USER_ID or message_type == "bot":
+        return "assistant"
+    if message_type == "system":
+        return "system"
+    return "user"
+
+
+async def fetch_recent_messages(room_id: str, exclude_message_id: str = "") -> list[dict[str, str]]:
+    if MEMORY_WINDOW_SIZE <= 0 or not room_id:
+        return []
+
+    params = {
+        "filter": f'room = "{room_id}"',
+        "sort": "-created",
+        "perPage": str(MEMORY_WINDOW_SIZE + 1),
+        "page": "1",
+        "fields": "items.id,items.text,items.user_id,items.message_type,items.created",
+    }
+    url = f"{POCKETBASE_URL}/api/collections/{MESSAGES_COLLECTION}/records"
+
+    try:
+        async with httpx.AsyncClient(timeout=AI_MODEL_TIMEOUT) as client:
+            response = await client.get(url, params=params)
+            response.raise_for_status()
+            data = response.json()
+    except Exception as exc:
+        logger.warning("Failed to load recent messages: %s", exc)
+        return []
+
+    items = data.get("items", []) if isinstance(data, dict) else []
+    history: list[dict[str, str]] = []
+
+    for item in reversed(items):
+        if not isinstance(item, dict):
+            continue
+        if exclude_message_id and item.get("id") == exclude_message_id:
+            continue
+        text = item.get("text", "")
+        if not isinstance(text, str) or not text.strip():
+            continue
+        role = map_message_role(item.get("message_type", "user"), item.get("user_id", ""))
+        history.append({"role": role, "content": text.strip()})
+
+    return history[-MEMORY_WINDOW_SIZE:]
+
+
 def queue_document_ingestion(document_id: str, room_id: str, file_urls: list[str]) -> None:
     logger.info(
         "Document ingestion queued",
@@ -304,6 +370,7 @@ async def chat_with_rag(record: dict[str, Any]) -> dict[str, Any]:
     attachments = normalize_file_list(record.get("attachments"))
     metadata = record.get("metadata")
     message_id = record.get("id", "")
+    conversation_history = await fetch_recent_messages(room_id, exclude_message_id=message_id)
 
     if message_id:
         try:
@@ -321,6 +388,7 @@ async def chat_with_rag(record: dict[str, Any]) -> dict[str, Any]:
         room_id=room_id,
         document_id=document_id,
         attachment_ids=attachments,
+        conversation_history=conversation_history,
         metadata=metadata if isinstance(metadata, dict) else {},
     )
     ai_response = await call_ai_model(payload)
@@ -502,6 +570,7 @@ def read_root():
         "ai_model_url_configured": bool(AI_MODEL_URL),
         "llm_provider": detect_llm_provider(),
         "llm_model": LLM_MODEL,
+        "memory_window_size": MEMORY_WINDOW_SIZE,
         "chroma_persist_dir": CHROMA_PERSIST_DIR,
     }
 

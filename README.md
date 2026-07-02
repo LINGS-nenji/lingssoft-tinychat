@@ -89,6 +89,7 @@ Expected response:
 4. Messages sent by the bot itself are ignored to prevent infinite response loops.
 5. The AI service routes chat requests through `chat_with_rag()`, which prepares message context for the model layer and writes the bot response back to the `messages` collection.
 6. File or document events can be routed separately to `/webhook/documents`, where `ingest_document()` runs in the background without blocking the chat response path.
+7. Before calling the model, FastAPI loads the most recent messages for the same room from PocketBase and sends them as lightweight conversation memory.
 
 If `AI_MODEL_URL` is configured, FastAPI forwards the user message through a provider-aware LLM adapter and uses the returned text as the bot response. Supported modes are `ollama`, `openai`, and `generic`. If `AI_MODEL_URL` is empty, the service falls back to the current placeholder response.
 
@@ -184,6 +185,7 @@ The FastAPI service uses the following environment variables.
 | `LLM_SYSTEM_PROMPT` | built-in default | System prompt sent to the model provider |
 | `LLM_TEMPERATURE` | `0.2` | Sampling temperature |
 | `LLM_MAX_TOKENS` | `512` | Output token budget or nearest provider equivalent |
+| `MEMORY_WINDOW_SIZE` | `8` | Number of recent room messages loaded from PocketBase as short-term memory |
 | `BOT_USER_ID` | `bot_user_id_placeholder` | Bot user ID written back to the `messages` collection |
 | `CHROMA_PERSIST_DIR` | `/data/chroma` | Persistent local directory for Chroma vector data |
 | `PORT` | `8000` | FastAPI container listening port |
@@ -198,6 +200,7 @@ environment:
   - AI_MODEL_TIMEOUT=30
   - LLM_PROVIDER=ollama
   - LLM_MODEL=qwen2.5:7b-instruct
+  - MEMORY_WINDOW_SIZE=8
   - BOT_USER_ID=your_bot_user_id
   - CHROMA_PERSIST_DIR=/data/chroma
   - PORT=8000
@@ -210,6 +213,7 @@ AI_MODEL_URL=http://host.docker.internal:11434/api/chat
 AI_MODEL_TIMEOUT=30
 LLM_PROVIDER=ollama
 LLM_MODEL=qwen2.5:7b-instruct
+MEMORY_WINDOW_SIZE=8
 BOT_USER_ID=your_bot_user_id
 CHROMA_PERSIST_DIR=/data/chroma
 PORT=8000
@@ -217,6 +221,16 @@ FASTAPI_HOST_PORT=8000
 ```
 
 The FastAPI container mounts `./chroma_data` to `/data/chroma`, so local vector data survives container restarts. This path is now reserved for the upcoming Chroma integration.
+
+### Lightweight memory
+
+For each incoming user message, FastAPI fetches up to `MEMORY_WINDOW_SIZE` recent records from the same `room` in PocketBase and includes them in the LLM request.
+
+- `openai`: the recent messages are appended as prior chat turns in `messages`
+- `ollama`: the recent messages are embedded into the prompt as `recent_conversation`
+- `generic`: the recent messages are passed in `conversation_history`
+
+This gives you a small working memory without introducing a heavier memory service.
 
 ### Provider modes
 
@@ -246,6 +260,10 @@ The generic request payload looks like this:
   "room_id": "general",
   "document_id": "document_record_id",
   "attachment_ids": ["attachment_record_id"],
+  "conversation_history": [
+    {"role": "user", "content": "Hi"},
+    {"role": "assistant", "content": "Hello, how can I help?"}
+  ],
   "metadata": {}
 }
 ```

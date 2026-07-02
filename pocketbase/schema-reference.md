@@ -19,6 +19,10 @@ Recommended fields:
 | `attachments` | relation (multiple) | no | `["attachment_id"]` | Optional related attachment records |
 | `metadata` | json | no | `{"source":"webhook"}` | Free-form app metadata |
 
+Memory note:
+
+- FastAPI reads recent messages from the same `room` and uses `message_type` plus `user_id` to map them into `user`, `assistant`, or `system` roles for lightweight short-term memory.
+
 ## 2. `documents`
 
 Purpose: track uploaded source files and ingestion lifecycle for RAG.
