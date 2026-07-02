@@ -34,6 +34,7 @@ services:
       - LLM_SYSTEM_PROMPT=${LLM_SYSTEM_PROMPT:-You are a helpful assistant for a lightweight PocketBase chat application.}
       - LLM_TEMPERATURE=${LLM_TEMPERATURE:-0.2}
       - LLM_MAX_TOKENS=${LLM_MAX_TOKENS:-512}
+      - MEMORY_WINDOW_SIZE=${MEMORY_WINDOW_SIZE:-8}
       - BOT_USER_ID=${BOT_USER_ID:-bot_user_id_placeholder}
       - CHROMA_PERSIST_DIR=${CHROMA_PERSIST_DIR:-/data/chroma}
       - PORT=${PORT:-8000}
